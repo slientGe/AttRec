@@ -19,7 +19,7 @@ def make_datasets(file,target_counts,seq_counts,isSave = True):
     user_unique = data['user'].unique().tolist()
     user_map = dict(zip(user_unique, range(1, len(user_unique) + 1)))
     user_map[-1] = 0
-    all_user_count = len(item_map)
+    all_user_count = len(user_map)
     data['user'] = data['user'].apply(lambda x: user_map[x])
 
     # Get user session
