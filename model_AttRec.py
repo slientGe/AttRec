@@ -14,8 +14,8 @@ class AttRec(object):
         self.w = config.w
         self.gamma = config.gamma
         self.l2_lambda = config.l2_lambda
-        self.u_init = tf.random_uniform_initializer(minval=-1.0 / self.emb_size,maxval=1.0 / self.emb_size)
-
+        #self.u_init = tf.random_uniform_initializer(minval=-1.0 / self.emb_size,maxval=1.0 / self.emb_size)
+        self.u_init = tf.keras.initializers.he_normal()
         self.keep_prob = tf.placeholder(tf.float32, name='keep_prob')
         self.is_Training = tf.placeholder(dtype=tf.bool, name='is_training')
         self.hist_seq = tf.placeholder(tf.int32, [None, None]) #[B,T]
@@ -30,6 +30,7 @@ class AttRec(object):
         with tf.variable_scope('AttRec'):
             # Embedding
             self.item_emb = tf.get_variable("item_emb", [self.item_count, self.emb_size],initializer=self.u_init) #[N,e]
+
             self.item_rep_emb = tf.get_variable("item_rep_emb", [self.item_count, self.emb_size],initializer=self.u_init) #[N,e]
             self.user_rep_emb = tf.get_variable("user_rep_emb", [self.user_count, self.emb_size],initializer=self.u_init) #[N,e]
 
@@ -49,18 +50,27 @@ class AttRec(object):
             # Mean
             div_num = tf.cast(tf.tile(tf.expand_dims(self.sl, 1), [1, self.emb_size]), tf.float32)
             m = tf.div(tf.reduce_sum(output, axis=1), div_num) #[B,e]
-
+            
             #Look up embedding for targets and negative samples
             u = tf.nn.embedding_lookup(self.user_rep_emb, self.u_p) #[B,e]
+            u = tf.nn.l2_normalize(u,-1)
+            u = tf.clip_by_norm(u, 1, -1)
 
-            pos_v = tf.nn.embedding_lookup(self.item_rep_emb, self.next_p,max_norm=1) #[B,pos,e]
-            neg_v = tf.nn.embedding_lookup(self.item_rep_emb, self.neg_p,max_norm=1) #[B,neg,e]
+            pos_v = tf.nn.embedding_lookup(self.item_rep_emb, self.next_p) #[B,pos,e]
+            pos_v = tf.clip_by_norm(pos_v,1,-1)
 
-            pos_x = tf.nn.embedding_lookup(self.item_emb, self.next_p,max_norm=1) #[B,pos,e]
-            neg_x = tf.nn.embedding_lookup(self.item_emb, self.neg_p,max_norm=1) #[B,neg,e]
+            neg_v = tf.nn.embedding_lookup(self.item_rep_emb, self.neg_p) #[B,neg,e]
+            neg_v = tf.clip_by_norm(neg_v, 1, -1)
 
-            pos_y = self.pos_object_function(u, pos_v, m, pos_x, self.w) #[B,tsl]
-            neg_y = self.neg_object_function(u, neg_v, m, neg_x, self.w) #[B,nsl]
+            pos_x = tf.nn.embedding_lookup(self.item_emb, self.next_p) #[B,pos,e]
+            pos_x = tf.clip_by_norm(pos_x, 1, -1)
+
+
+            neg_x = tf.nn.embedding_lookup(self.item_emb, self.neg_p)#[B,neg,e]
+            neg_x = tf.clip_by_norm(neg_x, 1, -1)
+
+            self.pos_y = pos_y = self.pos_object_function(u, pos_v, m, pos_x, self.w) #[B,tsl]
+            self.neg_y = neg_y = self.neg_object_function(u, neg_v, m, neg_x, self.w) #[B,nsl]
 
             #margin based hinge loss
             self.loss = self.loss_function(self.gamma, pos_y, neg_y)
@@ -69,14 +79,12 @@ class AttRec(object):
 
     def attention_module(self,query,key,value,unit):
         with tf.variable_scope('attention',reuse=True):
-            query = tf.layers.dense(query, unit, name='qk_map', activation=tf.nn.relu, use_bias=False,
-                                    reuse=tf.AUTO_REUSE,kernel_initializer=self.u_init
-                                    ,kernel_regularizer=tf.contrib.layers.l2_regularizer(self.l2_lambda))
+            query = tf.layers.dense(query, unit, name='qk_map', activation=tf.nn.relu, use_bias=False,kernel_initializer=self.u_init,
+                                    reuse=tf.AUTO_REUSE,kernel_regularizer=tf.contrib.layers.l2_regularizer(0.003))
             query = tf.nn.dropout(query, self.keep_prob)
 
-            key = tf.layers.dense(key, self.emb_size, name='qk_map', activation=tf.nn.relu, use_bias=False,
-                                  reuse=tf.AUTO_REUSE,kernel_initializer=self.u_init,
-                                  kernel_regularizer=tf.contrib.layers.l2_regularizer(self.l2_lambda))
+            key = tf.layers.dense(key, self.emb_size, name='qk_map', activation=tf.nn.relu, use_bias=False,kernel_initializer=self.u_init,
+                                  reuse=tf.AUTO_REUSE,kernel_regularizer=tf.contrib.layers.l2_regularizer(0.003))
             key = tf.nn.dropout(key, self.keep_prob)
 
             score = tf.matmul(query, tf.transpose(key, [0, 2, 1])) / math.sqrt(self.emb_size)  # [B,T,T]
@@ -105,8 +113,6 @@ class AttRec(object):
         return w * tf.reduce_sum(tf.square(U - V), axis=-1) + (1 - w) * tf.reduce_sum(tf.square(m - X), axis=-1)
 
     def loss_function(self, gamma, pos_y, neg_y):
-        # pos_y = tf.minimum(pos_y,1)
-        # neg_y = tf.minimum(neg_y,1)
         pos_y = tf.reshape(tf.tile(tf.expand_dims(pos_y, -1), [1, 1, self.nsl]), [-1, self.tsl * self.nsl])
         neg_y = tf.reshape(tf.tile(neg_y,[1,self.tsl]),[-1,self.tsl * self.nsl])
         loss = tf.reduce_mean(tf.nn.relu(pos_y + gamma - neg_y), axis=-1)
@@ -153,13 +159,6 @@ class AttRec(object):
         topk_index = top_k.indices
 
         return topk_index
-
-
-
-
-
-
-
 
 
 
